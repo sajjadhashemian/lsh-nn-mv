@@ -1,0 +1,16 @@
+dataset,arch_family,arch_size,num_params,num_voters,init_scheme,aggregate,seed,train_time_s,accuracy,knn_accuracy,gibbs_risk,disagreement
+tabular,MLP,m,20867,1,kaiming_normal,argmax,0,0.2144,0.771667,0.693333,0.228333,1.0
+tabular,MLP,m,62601,3,kaiming_normal,argmax,0,0.6601,0.798333,0.693333,0.226111,0.194444
+tabular,MLP,m,104335,5,kaiming_normal,argmax,0,0.9173,0.823333,0.693333,0.221,0.195833
+tabular,MLP,m,187803,9,kaiming_normal,argmax,0,2.4121,0.84,0.693333,0.214074,0.187685
+tabular,MLP,m,313005,15,kaiming_normal,argmax,0,3.0233,0.816667,0.693333,0.226111,0.192222
+tabular,MLP,m,20867,1,kaiming_normal,argmax,1,0.3703,0.74,0.718333,0.26,1.0
+tabular,MLP,m,62601,3,kaiming_normal,argmax,1,0.5749,0.748333,0.718333,0.280556,0.214444
+tabular,MLP,m,104335,5,kaiming_normal,argmax,1,0.9821,0.758333,0.718333,0.270333,0.194667
+tabular,MLP,m,187803,9,kaiming_normal,argmax,1,1.9523,0.745,0.718333,0.273519,0.194444
+tabular,MLP,m,313005,15,kaiming_normal,argmax,1,3.1158,0.751667,0.718333,0.274222,0.195952
+tabular,MLP,m,20867,1,kaiming_normal,argmax,2,0.1863,0.795,0.753333,0.205,1.0
+tabular,MLP,m,62601,3,kaiming_normal,argmax,2,0.7088,0.815,0.753333,0.207222,0.152222
+tabular,MLP,m,104335,5,kaiming_normal,argmax,2,1.1168,0.825,0.753333,0.202,0.148167
+tabular,MLP,m,187803,9,kaiming_normal,argmax,2,1.7466,0.818333,0.753333,0.214444,0.159167
+tabular,MLP,m,313005,15,kaiming_normal,argmax,2,2.9845,0.808333,0.753333,0.219667,0.168968
