@@ -9,7 +9,9 @@ import os
 import sys
 import time
 import math
-from typing import Callable, Dict, List, Tuple
+import warnings
+from dataclasses import dataclass
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -18,11 +20,10 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-from sklearn.datasets import make_classification
+from sklearn.datasets import make_classification, load_wine, load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.base import clone as sk_clone
 
 # Import estimator (assumes both files are in same directory or PYTHONPATH)
 from neural_voter_ensemble import (
@@ -324,9 +325,18 @@ def save_plot_accuracy_vs_voters(
     sub.to_csv(out_csv, index=False)
 
 
-# -----------------------
-# Builders for sweeps
-# -----------------------
+@dataclass
+class PreparedDataset:
+    X_train: np.ndarray
+    y_train: np.ndarray
+    X_test: np.ndarray
+    y_test: np.ndarray
+    input_shape: Tuple[int, ...]
+    num_classes: int
+    baseline_transformer: Optional[StandardScaler]
+    baseline_data: Tuple[np.ndarray, np.ndarray]
+
+
 def make_mlp_builders(
     num_voters: int, in_dim: int, out_dim: int, hidden: Tuple[int, ...]
 ) -> List[Callable[[], nn.Module]]:
@@ -348,6 +358,206 @@ def make_lstm_builders(
     ]
 
 
+def _hidden_by_size(arch_size: str, base: Sequence[int]) -> Tuple[int, ...]:
+    if arch_size == "s":
+        return tuple(int(max(8, h // 2)) for h in base)
+    if arch_size == "l":
+        return tuple(int(h * 2) for h in base)
+    return tuple(int(h) for h in base)
+
+
+def _lstm_hidden_by_size(arch_size: str, base: int) -> int:
+    if arch_size == "s":
+        return max(16, base // 2)
+    if arch_size == "l":
+        return base * 2
+    return base
+
+
+def load_uci_knn(dataset: str = "wine", seed: int = 0) -> PreparedDataset:
+    if dataset == "wine":
+        data = load_wine()
+    elif dataset == "breast_cancer":
+        data = load_breast_cancer()
+    else:
+        raise ValueError(f"Unsupported UCI dataset: {dataset}")
+
+    X = data.data.astype(np.float32)
+    y = data.target.astype(int)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=seed, stratify=y
+    )
+    scaler = StandardScaler()
+    X_train_sc = scaler.fit_transform(X_train).astype(np.float32)
+    X_test_sc = scaler.transform(X_test).astype(np.float32)
+    return PreparedDataset(
+        X_train=X_train_sc,
+        y_train=y_train,
+        X_test=X_test_sc,
+        y_test=y_test,
+        input_shape=(X.shape[1],),
+        num_classes=len(np.unique(y)),
+        baseline_transformer=scaler,
+        baseline_data=(X_train_sc, X_test_sc),
+    )
+
+
+def prepare_dataset(
+    dataset_name: str,
+    arch_family: str,
+    arch_size: str,
+    seed: int,
+) -> Tuple[PreparedDataset, Callable[[int], List[Callable[[], nn.Module]]]]:
+    arch_family = arch_family.lower()
+    if dataset_name == "mnist":
+        (Xtr, ytr), (Xte, yte), n_classes = load_mnist_like(
+            dataset="mnist", limit=6000, seed=seed
+        )
+        if arch_family == "cnn":
+            Xtr_flat = Xtr.reshape(len(Xtr), -1)
+            Xte_flat = Xte.reshape(len(Xte), -1)
+            scaler = StandardScaler()
+            Xtr_knn = scaler.fit_transform(Xtr_flat).astype(np.float32)
+            Xte_knn = scaler.transform(Xte_flat).astype(np.float32)
+            prepared = PreparedDataset(
+                X_train=Xtr,
+                y_train=ytr,
+                X_test=Xte,
+                y_test=yte,
+                input_shape=(1, 28, 28),
+                num_classes=n_classes,
+                baseline_transformer=scaler,
+                baseline_data=(Xtr_knn, Xte_knn),
+            )
+
+            def builders_factory(num_voters: int) -> List[Callable[[], nn.Module]]:
+                return make_cnn_builders(num_voters, n_classes)
+
+            return prepared, builders_factory
+        elif arch_family == "mlp":
+            Xtr_flat = Xtr.reshape(len(Xtr), -1)
+            Xte_flat = Xte.reshape(len(Xte), -1)
+            scaler = StandardScaler()
+            Xtr_scaled = scaler.fit_transform(Xtr_flat).astype(np.float32)
+            Xte_scaled = scaler.transform(Xte_flat).astype(np.float32)
+            hidden = _hidden_by_size(arch_size, (256, 256))
+            prepared = PreparedDataset(
+                X_train=Xtr_scaled,
+                y_train=ytr,
+                X_test=Xte_scaled,
+                y_test=yte,
+                input_shape=(Xtr_scaled.shape[1],),
+                num_classes=n_classes,
+                baseline_transformer=scaler,
+                baseline_data=(Xtr_scaled, Xte_scaled),
+            )
+
+            def builders_factory(num_voters: int) -> List[Callable[[], nn.Module]]:
+                return make_mlp_builders(num_voters, Xtr_scaled.shape[1], n_classes, hidden)
+
+            return prepared, builders_factory
+        elif arch_family == "rnn":
+            # Treat each image row as a timestep
+            Xtr_seq = Xtr.reshape(len(Xtr), 28, 28)
+            Xte_seq = Xte.reshape(len(Xte), 28, 28)
+            scaler = StandardScaler()
+            Xtr_flat = scaler.fit_transform(Xtr_seq.reshape(len(Xtr_seq), -1)).astype(
+                np.float32
+            )
+            Xte_flat = scaler.transform(Xte_seq.reshape(len(Xte_seq), -1)).astype(
+                np.float32
+            )
+            hidden = _lstm_hidden_by_size(arch_size, 128)
+            prepared = PreparedDataset(
+                X_train=Xtr_seq,
+                y_train=ytr,
+                X_test=Xte_seq,
+                y_test=yte,
+                input_shape=(28, 28),
+                num_classes=n_classes,
+                baseline_transformer=scaler,
+                baseline_data=(Xtr_flat, Xte_flat),
+            )
+
+            def builders_factory(num_voters: int) -> List[Callable[[], nn.Module]]:
+                return make_lstm_builders(num_voters, 28, n_classes, hidden)
+
+            return prepared, builders_factory
+        else:
+            raise ValueError(f"Unsupported architecture {arch_family} for MNIST")
+    elif dataset_name == "uci_wine":
+        prepared = load_uci_knn(dataset="wine", seed=seed)
+        if arch_family == "mlp":
+            hidden = _hidden_by_size(arch_size, (128, 64))
+
+            def builders_factory(num_voters: int) -> List[Callable[[], nn.Module]]:
+                return make_mlp_builders(
+                    num_voters, prepared.input_shape[0], prepared.num_classes, hidden
+                )
+
+            return prepared, builders_factory
+        elif arch_family == "rnn":
+            Xtr_seq = prepared.X_train.reshape(len(prepared.X_train), -1, 1)
+            Xte_seq = prepared.X_test.reshape(len(prepared.X_test), -1, 1)
+            hidden = _lstm_hidden_by_size(arch_size, 64)
+            prepared_seq = PreparedDataset(
+                X_train=Xtr_seq,
+                y_train=prepared.y_train,
+                X_test=Xte_seq,
+                y_test=prepared.y_test,
+                input_shape=(prepared.input_shape[0], 1),
+                num_classes=prepared.num_classes,
+                baseline_transformer=prepared.baseline_transformer,
+                baseline_data=prepared.baseline_data,
+            )
+
+            def builders_factory(num_voters: int) -> List[Callable[[], nn.Module]]:
+                return make_lstm_builders(
+                    num_voters, 1, prepared_seq.num_classes, hidden
+                )
+
+            return prepared_seq, builders_factory
+        else:
+            raise ValueError(
+                f"Architecture {arch_family} not supported for dataset {dataset_name}"
+            )
+    elif dataset_name == "uci_cancer":
+        prepared = load_uci_knn(dataset="breast_cancer", seed=seed)
+        hidden = _hidden_by_size(arch_size, (64, 64))
+
+        def builders_factory(num_voters: int) -> List[Callable[[], nn.Module]]:
+            return make_mlp_builders(
+                num_voters, prepared.input_shape[0], prepared.num_classes, hidden
+            )
+
+        return prepared, builders_factory
+    elif dataset_name == "sequence":
+        (Xtr, ytr), (Xte, yte) = load_sequence_synthetic(
+            n_samples=4000, T=30, D=8, n_classes=3, seed=seed
+        )
+        scaler = StandardScaler()
+        Xtr_vec = scaler.fit_transform(Xtr.mean(axis=1)).astype(np.float32)
+        Xte_vec = scaler.transform(Xte.mean(axis=1)).astype(np.float32)
+        hidden = _lstm_hidden_by_size(arch_size, 64)
+        prepared = PreparedDataset(
+            X_train=Xtr,
+            y_train=ytr,
+            X_test=Xte,
+            y_test=yte,
+            input_shape=(Xtr.shape[1], Xtr.shape[2]),
+            num_classes=len(np.unique(ytr)),
+            baseline_transformer=scaler,
+            baseline_data=(Xtr_vec, Xte_vec),
+        )
+
+        def builders_factory(num_voters: int) -> List[Callable[[], nn.Module]]:
+            return make_lstm_builders(num_voters, Xtr.shape[-1], prepared.num_classes, hidden)
+
+        return prepared, builders_factory
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+
+
 # -----------------------
 # Run one configuration
 # -----------------------
@@ -357,6 +567,7 @@ def run_one(
     arch_size: str,
     num_voters: int,
     aggregate: str,
+    init_scheme: str,
     seed: int,
     device: str,
     out_dir: str,
@@ -364,75 +575,20 @@ def run_one(
     set_all_seeds(seed)
     os.makedirs(out_dir, exist_ok=True)
 
-    # Load data and choose builders
-    if dataset_name == "tabular":
-        (Xtr, ytr), (Xte, yte) = load_tabular(
-            n_samples=3000, n_features=30, n_classes=3, seed=seed
-        )
-        scaler = StandardScaler()
-        in_dim = Xtr.shape[1]
-        out_dim = len(np.unique(ytr))
-        # hidden sizes by arch_size
-        hidden = (
-            (128, 128)
-            if arch_size == "m"
-            else (64,) if arch_size == "s" else (256, 256, 256)
-        )
-        builders = make_mlp_builders(num_voters, in_dim, out_dim, hidden)
-        transformer = scaler
-        knn_Xtr = scaler.fit_transform(Xtr)
-        knn_Xte = scaler.transform(Xte)
-        knn = KNeighborsClassifier(n_neighbors=5)
-        t0 = time.time()
-        knn.fit(knn_Xtr, ytr)
-        knn_acc = float(knn.score(knn_Xte, yte))
-        knn_time = time.time() - t0
+    prepared, builders_factory = prepare_dataset(
+        dataset_name=dataset_name, arch_family=arch_family, arch_size=arch_size, seed=seed
+    )
+    builders = builders_factory(num_voters)
 
-    elif dataset_name in ("mnist", "fashion"):
-        (Xtr, ytr), (Xte, yte), n_classes = load_mnist_like(
-            dataset=dataset_name, limit=6000, seed=seed
-        )
-        out_dim = n_classes
-        builders = make_cnn_builders(num_voters, out_dim)
-        transformer = None
-        # knn baseline: flatten + standardize
-        Xtr_flat = Xtr.reshape(len(Xtr), -1)
-        Xte_flat = Xte.reshape(len(Xte), -1)
-        scaler = StandardScaler()
-        knn_Xtr = scaler.fit_transform(Xtr_flat)
-        knn_Xte = scaler.transform(Xte_flat)
-        knn = KNeighborsClassifier(n_neighbors=3)
-        t0 = time.time()
-        knn.fit(knn_Xtr, ytr)
-        knn_acc = float(knn.score(knn_Xte, yte))
-        knn_time = time.time() - t0
-
-    elif dataset_name == "sequence":
-        (Xtr, ytr), (Xte, yte) = load_sequence_synthetic(
-            n_samples=4000, T=30, D=8, n_classes=3, seed=seed
-        )
-        in_dim = Xtr.shape[-1]
-        out_dim = len(np.unique(ytr))
-        hidden = 64 if arch_size == "s" else 128 if arch_size == "m" else 256
-        builders = make_lstm_builders(num_voters, in_dim, out_dim, hidden)
-        transformer = None
-        # knn baseline: mean-pool over time then standardize
-        Xtr_vec = Xtr.mean(axis=1)
-        Xte_vec = Xte.mean(axis=1)
-        scaler = StandardScaler()
-        knn_Xtr = scaler.fit_transform(Xtr_vec)
-        knn_Xte = scaler.transform(Xte_vec)
-        knn = KNeighborsClassifier(n_neighbors=5)
-        t0 = time.time()
-        knn.fit(knn_Xtr, ytr)
-        knn_acc = float(knn.score(knn_Xte, yte))
-        knn_time = time.time() - t0
-
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
+    knn = KNeighborsClassifier(n_neighbors=5)
+    Xtr_knn, Xte_knn = prepared.baseline_data
+    t0 = time.time()
+    knn.fit(Xtr_knn, prepared.y_train)
+    knn_acc = float(knn.score(Xte_knn, prepared.y_test))
+    knn_time = time.time() - t0
 
     # Init distributions (same for all voters for simplicity)
-    initd = InitDistribution(scheme="kaiming_normal", nonlinearity="relu")
+    initd = InitDistribution(scheme=init_scheme, nonlinearity="relu")
 
     est = NeuralVoterEnsemble(
         voter_builders=builders,
@@ -440,7 +596,7 @@ def run_one(
         aggregate=aggregate,
         device=device,
         random_state=seed,
-        epochs=5 if dataset_name != "mnist" and dataset_name != "fashion" else 3,
+        epochs=5 if dataset_name not in {"mnist"} else 3,
         batch_size=128,
         lr=1e-3,
         weight_decay=1e-4,
@@ -448,16 +604,16 @@ def run_one(
         early_stopping_patience=2,
         class_weight=None,
         num_workers=0,
-        sklearn_transformer=transformer,
+        sklearn_transformer=None,
         verbose=1 if num_voters <= 5 else 0,
     )
 
     t0 = time.time()
-    est.fit(Xtr, ytr)
+    est.fit(prepared.X_train, prepared.y_train)
     train_time_s = time.time() - t0
 
-    acc = float(est.score(Xte, yte))
-    mets = est.metrics_on_dataset(Xte, yte)
+    acc = float(est.score(prepared.X_test, prepared.y_test))
+    mets = est.metrics_on_dataset(prepared.X_test, prepared.y_test)
     gibbs = float(mets["gibbs_risk"])
     disag = float(mets["disagreement"])
     num_params = int(sum(est.voter_num_params_))
@@ -468,12 +624,13 @@ def run_one(
         "arch_size": arch_size,
         "num_params": str(num_params),
         "num_voters": str(num_voters),
-        "init_scheme": "kaiming_normal",
+        "init_scheme": init_scheme,
         "aggregate": aggregate,
         "seed": str(seed),
         "train_time_s": f"{train_time_s:.4f}",
         "accuracy": f"{acc:.6f}",
         "knn_accuracy": f"{knn_acc:.6f}",
+        "knn_time_s": f"{knn_time:.4f}",
         "gibbs_risk": f"{gibbs:.6f}",
         "disagreement": f"{disag:.6f}",
     }
@@ -486,10 +643,18 @@ def run_one(
 def main():
     parser = argparse.ArgumentParser(description="Neural Voter Ensemble Experiments")
     parser.add_argument(
-        "--dataset",
+        "--datasets",
         type=str,
-        default="tabular",
-        choices=["tabular", "mnist", "fashion", "sequence"],
+        nargs="+",
+        default=["mnist", "uci_wine"],
+        help="Datasets to evaluate (mnist, uci_wine, uci_cancer, sequence)",
+    )
+    parser.add_argument(
+        "--architectures",
+        type=str,
+        nargs="+",
+        default=["cnn", "mlp", "rnn"],
+        help="Architectures to evaluate",
     )
     parser.add_argument(
         "--device", type=str, default="auto", choices=["auto", "cpu", "cuda"]
@@ -503,36 +668,51 @@ def main():
         nargs="+",
         default=["mean_logits", "mean_probs", "argmax"],
     )
-    parser.add_argument("--arch_size", type=str, default="m", choices=["s", "m", "l"])
+    parser.add_argument("--arch_sizes", type=str, nargs="+", default=["s", "m", "l"])
+    parser.add_argument(
+        "--init_schemes",
+        type=str,
+        nargs="+",
+        default=["kaiming_normal", "kaiming_uniform", "xavier_uniform"],
+    )
     args = parser.parse_args()
 
     print(f"[env] {env_summary()}")
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # choose arch_family from dataset
-    arch_family = {
-        "tabular": "MLP",
-        "mnist": "CNN",
-        "fashion": "CNN",
-        "sequence": "LSTM",
-    }[args.dataset]
-
     rows: List[Dict[str, str]] = []
-    for seed in args.seeds:
-        for nv in args.voters:
-            for agg in args.aggregates:
-                row = run_one(
-                    dataset_name=args.dataset,
-                    arch_family=arch_family,
-                    arch_size=args.arch_size,
-                    num_voters=nv,
-                    aggregate=agg,
-                    seed=seed,
-                    device=args.device,
-                    out_dir=args.out_dir,
-                )
-                rows.append(row)
-                print("[row]", row)
+    for dataset_name in args.datasets:
+        for arch_family in args.architectures:
+            for arch_size in args.arch_sizes:
+                for init_scheme in args.init_schemes:
+                    skip_combo = False
+                    for seed in args.seeds:
+                        if skip_combo:
+                            break
+                        for nv in args.voters:
+                            if skip_combo:
+                                break
+                            for agg in args.aggregates:
+                                try:
+                                    row = run_one(
+                                        dataset_name=dataset_name,
+                                        arch_family=arch_family,
+                                        arch_size=arch_size,
+                                        num_voters=nv,
+                                        aggregate=agg,
+                                        init_scheme=init_scheme,
+                                        seed=seed,
+                                        device=args.device,
+                                        out_dir=args.out_dir,
+                                    )
+                                except ValueError as exc:
+                                    warnings.warn(
+                                        f"Skipping configuration (dataset={dataset_name}, arch={arch_family}, size={arch_size}) due to: {exc}"
+                                    )
+                                    skip_combo = True
+                                    break
+                                rows.append(row)
+                                print("[row]", row)
 
     # write consolidated CSV
     csv_path = os.path.join(args.out_dir, "sweep_results.csv")
@@ -551,6 +731,7 @@ def main():
                 "train_time_s",
                 "accuracy",
                 "knn_accuracy",
+                "knn_time_s",
                 "gibbs_risk",
                 "disagreement",
             ],
