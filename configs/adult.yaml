@@ -1,0 +1,12 @@
+seed: 0
+dataset:
+  name: adult
+  batch_size: 512
+model:
+  width: 256
+  depth: 2
+  sigma_grid: [0.1, 0.25, 0.5, 1.0]
+evaluation:
+  ensemble_sizes: [1, 2, 4, 8, 16]
+  attack_eps: [0.05]
+output_dir: results

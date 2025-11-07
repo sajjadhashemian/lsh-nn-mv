@@ -1,0 +1,14 @@
+seed: 0
+dataset:
+  name: cifar10
+  root: ./data
+  batch_size: 256
+  num_workers: 2
+model:
+  width: 1024
+  depth: 3
+  sigma_grid: [0.25, 0.5, 1.0, 1.5]
+evaluation:
+  ensemble_sizes: [1, 2, 4, 8, 16, 32]
+  attack_eps: [0.01, 0.05]
+output_dir: results
