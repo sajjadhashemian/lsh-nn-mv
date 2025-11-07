@@ -453,7 +453,9 @@ def prepare_dataset(
             )
 
             def builders_factory(num_voters: int) -> List[Callable[[], nn.Module]]:
-                return make_mlp_builders(num_voters, Xtr_scaled.shape[1], n_classes, hidden)
+                return make_mlp_builders(
+                    num_voters, Xtr_scaled.shape[1], n_classes, hidden
+                )
 
             return prepared, builders_factory
         elif arch_family == "rnn":
@@ -551,7 +553,9 @@ def prepare_dataset(
         )
 
         def builders_factory(num_voters: int) -> List[Callable[[], nn.Module]]:
-            return make_lstm_builders(num_voters, Xtr.shape[-1], prepared.num_classes, hidden)
+            return make_lstm_builders(
+                num_voters, Xtr.shape[-1], prepared.num_classes, hidden
+            )
 
         return prepared, builders_factory
     else:
@@ -576,7 +580,10 @@ def run_one(
     os.makedirs(out_dir, exist_ok=True)
 
     prepared, builders_factory = prepare_dataset(
-        dataset_name=dataset_name, arch_family=arch_family, arch_size=arch_size, seed=seed
+        dataset_name=dataset_name,
+        arch_family=arch_family,
+        arch_size=arch_size,
+        seed=seed,
     )
     builders = builders_factory(num_voters)
 

@@ -32,7 +32,7 @@ A modular **scikit-learn estimator** that aggregates **user-supplied PyTorch vot
 * [Extending & Customizing](#extending--customizing)
 * [Limitations & Notes](#limitations--notes)
 * [Reproducibility Checklist](#reproducibility-checklist)
-* [License](#license)
+
 
 ---
 
